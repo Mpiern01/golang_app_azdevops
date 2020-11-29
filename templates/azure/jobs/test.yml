@@ -1,0 +1,89 @@
+parameters:
+  appName: ''
+
+jobs:
+  - job: RunTests
+    strategy:
+      matrix:
+        GoVersion_1_13:
+          go.version: '1.13'
+        GoVersion_1_14:
+          go.version: '1.14'
+        GoVersion_1_15:
+          go.version: '1.15'
+
+    pool:
+      vmImage: 'ubuntu-18.04'
+
+    steps:
+      - template: ../steps/setupgo.yml
+        parameters:
+          goVersion: '$(go.version)'
+
+      - template: ../steps/buildapp.yml
+        parameters:
+          appName: ${{ parameters.appName }}
+
+      - script: |
+          set -e -x
+          go version
+          go get -u github.com/jstemmer/go-junit-report
+          go get github.com/axw/gocov/gocov
+          go get github.com/AlekSi/gocov-xml
+
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin latest
+        displayName: 'Install Dependencies'
+
+      - script: |
+          set -e -x
+          golangci-lint run
+        displayName: 'Run Code Quality Checks'
+
+      - script: |
+          set -e -x
+          go test -v -coverprofile=coverage.txt -covermode count ./... > test_results.txt
+          go-junit-report < test_results.txt > report.xml
+        displayName: 'Run Unit Tests'
+
+      - task: PublishTestResults@2
+        displayName: 'Publish Test Results'
+        inputs:
+          testRunner: JUnit
+          testResultsFiles: $(System.DefaultWorkingDirectory)/**/report.xml
+
+      - script: |
+          set -e -x
+          gocov convert coverage.txt > coverage.json
+          gocov-xml < coverage.json > coverage.xml
+        displayName: 'Run Code Coverage Tests'
+
+      - task: PublishCodeCoverageResults@1
+        displayName: 'Publish Code Coverage'
+        inputs:
+          codeCoverageTool: Cobertura
+          summaryFileLocation: $(System.DefaultWorkingDirectory)/**/coverage.xml
+
+#      - script: |
+#          curl https://cdn.shiftleft.io/download/sl > $BUILD_SOURCESDIRECTORY/sl && chmod a+rx $BUILD_SOURCESDIRECTORY/sl
+#          $BUILD_SOURCESDIRECTORY/sl analyze --wait --tag branch=$BUILD_SOURCEBRANCHNAME --tag app.group=MyLabs --tag app.language=go --app MyLabs-G0 --cpg --go ./...
+#        displayName: 'Run Vulnerability Checks'
+#        env:
+#          SHIFTLEFT_ORG_ID: $(SHIFTLEFT_ORG_ID)
+#          SHIFTLEFT_ACCESS_TOKEN: $(SHIFTLEFT_ACCESS_TOKEN)
+
+      - script: |
+          set -e -x
+          docker run \
+          -v "$(Build.SourcesDirectory):/app:cached" \
+          -v "$(Build.ArtifactStagingDirectory):/reports:cached" \
+          shiftleft/sast-scan scan --src /app \
+          --out_dir /reports/CodeAnalysisLogs
+        displayName: "Perform ShiftLeft SAST Scan"
+        continueOnError: "true"
+
+      - task: PublishBuildArtifacts@1
+        displayName: "Publish ShiftLeft SAST Scan Results"
+        inputs:
+          PathtoPublish: "$(Build.ArtifactStagingDirectory)/CodeAnalysisLogs"
+          ArtifactName: "CodeAnalysisLogs"
+          publishLocation: "Container"
